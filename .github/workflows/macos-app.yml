@@ -88,7 +88,11 @@ jobs:
   app:
     name: Universal app
     needs: hacktv
-    runs-on: macos-15
+    # Assembly needs no Apple Silicon (lipo, codesign and hdiutil work on
+    # Intel), and the arm64 runner pool is often short of capacity
+    # ("job was not acquired by Runner"), so only the arm64 hacktv build
+    # waits for it. Each slice was already self-tested on its native runner.
+    runs-on: macos-15-intel
 
     steps:
       - name: Check out source
@@ -148,15 +152,12 @@ jobs:
 
       - name: Check bundled hacktv
         run: |
-          lipo -archs dist/hacktv-gui.app/Contents/app/hacktv
+          test "$(lipo -archs dist/hacktv-gui.app/Contents/app/hacktv | tr ' ' '\n' | sort | xargs)" = "arm64 x86_64"
+          # The x86_64 slice and runtime run here; the arm64 slice was
+          # self-tested on the arm64 runner and is checked by signature
           dist/hacktv-gui.app/Contents/app/hacktv --help 2>&1 | head -2
-          # Rosetta (if present on the runner) lets the x86_64 slice be tested too
-          if arch -x86_64 /usr/bin/true 2>/dev/null; then
-            arch -x86_64 dist/hacktv-gui.app/Contents/app/hacktv --help 2>&1 | head -2
-            arch -x86_64 dist/hacktv-gui.app/Contents/runtime/x86_64/bin/java -version
-          else
-            echo "Rosetta not available; x86_64 slice was tested on the Intel runner"
-          fi
+          dist/hacktv-gui.app/Contents/runtime/x86_64/bin/java -version
+          codesign --verify --strict --verbose=2 dist/hacktv-gui.app
 
       - name: Upload app
         uses: actions/upload-artifact@v7
