@@ -34,10 +34,19 @@ jobs:
         include:
           # Runner images are pinned: macos-latest can jump a macOS major
           # and silently change the build output.
-          - runner: macos-15
+          #
+          # arm64 is cross-compiled on the Intel runner: the hosted arm64
+          # pool repeatedly failed to pick up jobs ("The job was not
+          # acquired by Runner of type hosted even after multiple
+          # attempts", 5 of 6 runs on 2026-11-16). The arm64 slice gets the
+          # static checks here; it cannot be executed on Intel.
+          - runner: macos-15-intel
             arch: arm64
+            target: arm64
           - runner: macos-15-intel
             arch: x86_64
+            target: ''
+
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -59,6 +68,8 @@ jobs:
           cmake --version | head -1
 
       - name: Build hacktv
+        env:
+          HACKTV_TARGET_ARCH: ${{ matrix.target }}
         run: scripts/build-hacktv.sh "$RUNNER_TEMP/build"
 
       - name: Check architecture
@@ -89,9 +100,7 @@ jobs:
     name: Universal app
     needs: hacktv
     # Assembly needs no Apple Silicon (lipo, codesign and hdiutil work on
-    # Intel), and the arm64 runner pool is often short of capacity
-    # ("job was not acquired by Runner"), so only the arm64 hacktv build
-    # waits for it. Each slice was already self-tested on its native runner.
+    # Intel), and the hosted arm64 pool is often out of capacity.
     runs-on: macos-15-intel
 
     steps:
@@ -153,8 +162,8 @@ jobs:
       - name: Check bundled hacktv
         run: |
           test "$(lipo -archs dist/hacktv-gui.app/Contents/app/hacktv | tr ' ' '\n' | sort | xargs)" = "arm64 x86_64"
-          # The x86_64 slice and runtime run here; the arm64 slice was
-          # self-tested on the arm64 runner and is checked by signature
+          # The x86_64 slice and runtime run here; the arm64 slice (cross
+          # built) is checked statically and by signature
           dist/hacktv-gui.app/Contents/app/hacktv --help 2>&1 | head -2
           dist/hacktv-gui.app/Contents/runtime/x86_64/bin/java -version
           codesign --verify --strict --verbose=2 dist/hacktv-gui.app

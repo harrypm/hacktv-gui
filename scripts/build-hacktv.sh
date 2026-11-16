@@ -17,14 +17,28 @@
 # Usage: scripts/build-hacktv.sh [workdir]
 # Output: <workdir>/out/hacktv-<arch>  and  <workdir>/out/testsignals/
 #
+# macOS cross build: HACKTV_TARGET_ARCH=arm64 on an Intel Mac (or x86_64
+# on Apple Silicon) builds for that architecture with Apple's toolchain.
+# The binary cannot be run on the build machine, so the run tests (--help,
+# baseband self-test) are skipped; all static checks still apply.
+#
 # Requirements on PATH: curl, git, make, cmake, pkg-config (or pkgconf),
 # and nasm on x86_64 (FFmpeg assembly).
 
 set -euo pipefail
 
 OS="$(uname -s)"     # Darwin | Linux
-ARCH="$(uname -m)"   # arm64 | x86_64 | aarch64
+HOST_ARCH="$(uname -m)"   # arm64 | x86_64 | aarch64
+ARCH="${HACKTV_TARGET_ARCH:-$HOST_ARCH}"
 case "$OS" in Darwin|Linux) ;; *) echo "unsupported OS: $OS" >&2; exit 1 ;; esac
+CROSS=0
+if [ "$ARCH" != "$HOST_ARCH" ]; then
+	case "$OS:$ARCH" in
+		Darwin:arm64|Darwin:x86_64) CROSS=1 ;;
+		*) echo "cross build to $ARCH is only supported on macOS (arm64/x86_64)" >&2; exit 1 ;;
+	esac
+fi
+FFMPEG_CROSS=""
 WORK="${1:-$PWD/build-macos}"
 WORK="$(mkdir -p "$WORK" && cd "$WORK" && pwd)"
 SRC="$WORK/src"
@@ -33,10 +47,15 @@ OUT="$WORK/out"
 if [ "$OS" = Darwin ]; then
 	JOBS="$(sysctl -n hw.ncpu)"
 	export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-	MINOS="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+	# -arch selects the target (same as the host unless cross building)
+	MINOS="-arch $ARCH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 	# libusb's macOS backend needs these frameworks when linked statically
 	USB_PRIVATE_LIBS="-Wl,-framework,IOKit -Wl,-framework,CoreFoundation -Wl,-framework,Security -lobjc"
 	LIBUSB_CONF=""
+	if [ "$CROSS" = 1 ]; then
+		LIBUSB_CONF="--host=$([ "$ARCH" = arm64 ] && echo aarch64 || echo x86_64)-apple-darwin"
+		FFMPEG_CROSS="--enable-cross-compile --arch=$ARCH --target-os=darwin"
+	fi
 	# FFmpeg uses iconv (subtitles); on macOS it is libiconv, not libSystem,
 	# and FFmpeg's .pc files do not list it
 	HACKTV_EXTRA_LIBS="-liconv"
@@ -100,7 +119,7 @@ fetch() {
 }
 
 mkdir -p "$SRC" "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$OUT"
-log "Building hacktv for $OS $ARCH in $WORK"
+log "Building hacktv for $OS $ARCH in $WORK$([ "$CROSS" = 1 ] && echo " (cross build on $HOST_ARCH)" || true)"
 
 # Keep pkg-config away from anything outside our prefix (Homebrew etc.)
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -113,7 +132,7 @@ if [ ! -f "$PREFIX/lib/libusb-1.0.a" ]; then
 	f="$(fetch "$LIBUSB_URL" "$LIBUSB_SHA256")"
 	rm -rf "$SRC/libusb-1.0.26" && tar -xjf "$f" -C "$SRC"
 	( cd "$SRC/libusb-1.0.26" &&
-	  CFLAGS="-O2 $MINOS" ./configure --prefix="$PREFIX" --enable-static --disable-shared $LIBUSB_CONF >/dev/null &&
+	  CFLAGS="-O2 $MINOS" LDFLAGS="$MINOS" ./configure --prefix="$PREFIX" --enable-static --disable-shared $LIBUSB_CONF >/dev/null &&
 	  make -j"$JOBS" install >/dev/null )
 fi
 
@@ -129,6 +148,7 @@ if [ ! -f "$PREFIX/lib/libhackrf.a" ]; then
 	( cd "$b" &&
 	  cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release \
 	        ${MACOSX_DEPLOYMENT_TARGET:+-DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"} \
+	        $([ "$OS" = Darwin ] && echo "-DCMAKE_OSX_ARCHITECTURES=$ARCH") \
 	        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
 	        -DLIBUSB_INCLUDE_DIR="$PREFIX/include/libusb-1.0" \
 	        -DLIBUSB_LIBRARIES="$PREFIX/lib/libusb-1.0.a" >/dev/null &&
@@ -178,7 +198,7 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
 	        --enable-static --disable-shared --enable-pic \
 	        --disable-programs --disable-doc --disable-debug \
 	        --disable-autodetect \
-	        --enable-zlib --enable-iconv $FFMPEG_PLATFORM \
+	        --enable-zlib --enable-iconv $FFMPEG_PLATFORM $FFMPEG_CROSS \
 	        --extra-cflags="$MINOS" --extra-ldflags="$MINOS" \
 	        > "$WORK/ffmpeg-configure-$ARCH.log" 2>&1 ||
 	  { tail -40 "$WORK/ffmpeg-configure-$ARCH.log"; tail -40 ffbuild/config.log; exit 1; }
@@ -241,17 +261,24 @@ grep -q "HAVE_FL2K" "$WORK/hacktv-make-$ARCH.log" || fail "built without FL2K su
 v="$(strings -a "$BIN" | grep -E '^[0-9]{8}-[0-9a-f]{7}' | head -1)"
 [ "$v" = "$HACKTV_VERSION_EXPECT" ] || fail "version string '$v', expected $HACKTV_VERSION_EXPECT"
 
-grep -q "Usage: hacktv" <<< "$("$BIN" --help 2>&1)" || fail "--help did not run"
+if [ "$CROSS" = 1 ]; then
+	echo "cross build: run tests skipped (--help, baseband self-test); run them on a $ARCH machine"
+else
+	grep -q "Usage: hacktv" <<< "$("$BIN" --help 2>&1)" || fail "--help did not run"
+fi
 [ "$(ls "$OUT/testsignals" | wc -l)" -ge 19 ] || fail "test signals missing"
 [ "$(fsize "$OUT/testsignals/pm8546g.bin")" = "32768" ] || fail "pm8546g.bin is not 32768 bytes"
 
 # Functional test: render PAL colour bars to a baseband file for ~2 seconds
 # (perl alarm = portable timeout; hacktv does not trap SIGALRM)
-t="$WORK/selftest-$ARCH.bin"; rm -f "$t"
-( perl -e 'alarm shift; exec @ARGV' 2 "$BIN" -m pal -s 13500000 -o "$t" test >/dev/null 2>&1 ) 2>/dev/null || true
-sz="$( [ -f "$t" ] && fsize "$t" || echo 0)"
-[ "$sz" -gt 1000000 ] || fail "baseband self-test produced $sz bytes"
-rm -f "$t"
+sz="skipped"
+if [ "$CROSS" = 0 ]; then
+	t="$WORK/selftest-$ARCH.bin"; rm -f "$t"
+	( perl -e 'alarm shift; exec @ARGV' 2 "$BIN" -m pal -s 13500000 -o "$t" test >/dev/null 2>&1 ) 2>/dev/null || true
+	sz="$( [ -f "$t" ] && fsize "$t" || echo 0)"
+	[ "$sz" -gt 1000000 ] || fail "baseband self-test produced $sz bytes"
+	rm -f "$t"
+fi
 
 [ "$OS" = Darwin ] && echo "minos: $(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
-echo "OK: $BIN ($v, $OS $ARCH, self-test $sz bytes)"
+echo "OK: $BIN ($v, $OS $ARCH, self-test: $sz)"
