@@ -6,15 +6,21 @@ name: Build and release
 #   Linux   x86_64 + aarch64 .deb and .AppImage
 # All bundle hacktv built from inaxeon/hacktv (HackDAC support).
 #
-# Start a release either way:
+# Every push to the branch builds and tests all packages (downloadable as
+# run artifacts); nothing is published.
+#
+# Publish a release either way:
 #   - push a tag:        git tag v1.2.3 && git push origin v1.2.3
 #   - Actions tab:       "Build and release" > Run workflow > tag v1.2.3
 #     (the tag is created on the selected branch's commit when the release
-#     is published)
+#     is published; the button only shows once this file is on the
+#     repository's default branch)
 # Nothing is published unless every platform builds and passes its checks.
 
 on:
   push:
+    branches:
+      - macos-universal-app
     tags:
       - 'v*'
   workflow_dispatch:
@@ -39,23 +45,34 @@ concurrency:
 
 jobs:
   prepare:
-    name: Check tag
+    name: Version
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      publish: ${{ steps.tag.outputs.publish }}
     steps:
-      - name: Validate tag
+      - name: Determine version and whether to publish
         id: tag
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
+          IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
         run: |
+          if [ "$IS_RELEASE" != "true" ]; then
+            # Branch push: test build only, versioned by commit
+            v="${GITHUB_SHA::7}"
+            echo "version=$v" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Test build $v (not published)"
+            exit 0
+          fi
           if ! [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::'$TAG' is not a release tag (expected v1.2.3 or v1.2.3-beta1)"
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "Releasing $TAG"
 
   macos:
@@ -79,6 +96,7 @@ jobs:
   release:
     name: Publish release
     needs: [prepare, macos, windows, linux]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

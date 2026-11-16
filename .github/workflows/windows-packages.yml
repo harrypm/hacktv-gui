@@ -8,10 +8,8 @@ name: Build Windows packages
 # Unsigned (the upstream release signing uses the maintainer's certificate),
 # so SmartScreen will warn on first run.
 
+# Run as part of "Build and release" (release.yml); can also be run alone
 on:
-  push:
-    branches:
-      - macos-universal-app
   workflow_dispatch:
     inputs:
       version:

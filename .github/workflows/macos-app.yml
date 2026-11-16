@@ -4,10 +4,8 @@ name: Build macOS universal app
 # (inaxeon/hacktv, HackDAC support) and bundled Java runtimes.
 # Build logic lives in scripts/macos/ so it can be run and tested locally.
 
+# Run as part of "Build and release" (release.yml); can also be run alone
 on:
-  push:
-    branches:
-      - macos-universal-app
   workflow_dispatch:
     inputs:
       version:

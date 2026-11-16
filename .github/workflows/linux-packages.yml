@@ -6,10 +6,8 @@ name: Build Linux packages
 # its test signals and a Temurin 21 JRE.
 # Build logic: scripts/build-hacktv.sh + scripts/linux/make-packages.sh.
 
+# Run as part of "Build and release" (release.yml); can also be run alone
 on:
-  push:
-    branches:
-      - macos-universal-app
   workflow_dispatch:
     inputs:
       version:
