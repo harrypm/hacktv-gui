@@ -163,7 +163,14 @@ public class MainWindow extends javax.swing.JFrame {
     public static final Preferences PREFS = Preferences.userNodeForPackage(MainWindow.class);
     
     // hacktv process, used to gracefully close hacktv via the Stop button
-    private Process hacktvProcess;
+    private volatile Process hacktvProcess;
+    // Set when the user presses Stop, so an automatic restart (see
+    // runHackTV) is never attempted after a deliberate stop.
+    private volatile boolean stopRequested;
+    // Automatic restart when the SDR is still held by the previous run
+    private static final int DEVICE_BUSY_RETRIES = 5;
+    private static final long DEVICE_BUSY_RETRY_DELAY_MS = 500;
+    private static final long DEVICE_BUSY_WINDOW_MS = 3000;
     
     // Boolean to determine if hacktv is running or not
     private boolean running;
@@ -2139,6 +2146,21 @@ public class MainWindow extends javax.swing.JFrame {
     }
     
     public int postInitUI(String[] args) {
+        // Ensure a running hacktv process is always terminated if the JVM
+        // exits without the window-closing handlers running (force-quit,
+        // crash or kill). Otherwise the orphaned process keeps the HackRF
+        // USB device open and the next run fails with an access error.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (hacktvProcess == null || !hacktvProcess.isAlive()) return;
+            hacktvProcess.destroy(); // SIGTERM; lets hacktv stop the HackRF gracefully
+            try {
+                if (!hacktvProcess.waitFor(1, TimeUnit.SECONDS)) hacktvProcess.destroyForcibly();
+            }
+            catch (InterruptedException e) {
+                hacktvProcess.destroyForcibly();
+                Thread.currentThread().interrupt();
+            }
+        }));
         // Set the jarDir variable so we know where we're located
         jarDir = Path.of(Shared.getCurrentDirectory());
         // Set OS-specific options
@@ -2200,6 +2222,22 @@ public class MainWindow extends javax.swing.JFrame {
         var card = (CardLayout) sourceCardPanel.getLayout();
         card.show(sourceCardPanel, "textbox");
         txtGain.setText("0");
+        // When HackDAC support is enabled, default to a baseband output with
+        // the EBU/SMPTE colour bars test signal, so the HackDAC path works
+        // out of the box.
+        if (chkHackDAC.isSelected()) {
+            var bb = modes.stream()
+                    .filter(m -> m.modulation() == UNMODULATED && m.colourMode() == ColourMode.PAL)
+                    .findFirst();
+            if (bb.isPresent()) {
+                var m = bb.get();
+                lstColour.setSelectedValue(new ColourOption(m.colourMode(), m.colourMode().displayName()), true);
+                cmbMode.setSelectedItem(m);
+                // Select the test source, then the EBU (or SMPTE) bars
+                radTest.doClick();
+                selectTestSignal("cbar", "smtpe");
+            }
+        }
         updateMenu.setVisible(false);
         // End default value load
         checkMRUList();
@@ -3016,6 +3054,10 @@ public class MainWindow extends javax.swing.JFrame {
             }            
         }
         String displayName = modesIni.get(mode, "name", mode);
+        if (mt == UNMODULATED && displayName != null) {
+            // Display baseband modes as "baseband" rather than "unmodulated"
+            displayName = displayName.replace("(unmodulated)", "(baseband)");
+        }
         boolean ns = modesIni.getBoolean(mode, "nonstandard");
         if (ns && displayName != null) {
             // Display an asterisk beside the name to indicate a non-standard mode
@@ -5903,7 +5945,7 @@ public class MainWindow extends javax.swing.JFrame {
             }
             // Remove any items where the pattern file is missing
             if (supportsPhilipsTestSignal) {
-                String dir = PREFS.get("testdir", hackTVDirectory);
+                String dir = getTestSignalDir();
                 if (!Files.exists(Paths.get(dir, "pm8546g.bin"))) {
                     // Remove everything, this file is a prerequisite
                     options.clear();
@@ -5957,7 +5999,7 @@ public class MainWindow extends javax.swing.JFrame {
                         return null;
                     }                
                     // Test signals location
-                    String p = PREFS.get("testdir", hackTVDirectory);
+                    String p = getTestSignalDir();
                     al.add("--testsignals-path");
                     if ((isWindows) && (p.matches(".*\\s.*"))) {
                         al.add('\u0022' + p + '\u0022');
@@ -6008,12 +6050,38 @@ public class MainWindow extends javax.swing.JFrame {
         return al;
     }
     
+    private String getTestSignalDir() {
+        // Resolve the location of the test signal patterns. In order of
+        // preference: a directory set in the preferences (testdir), a share
+        // directory installed alongside the hacktv binary, then the
+        // directory containing the hacktv binary itself.
+        String d = PREFS.get("testdir", "");
+        if (!d.isBlank()) return d;
+        var shared = Paths.get(hackTVDirectory).resolve("../share/hacktv/testsignals").normalize();
+        if (Files.exists(shared.resolve("pm8546g.bin"))) return shared.toString();
+        return hackTVDirectory;
+    }
+    
+    private void selectTestSignal(String... commands) {
+        // Select the first test signal whose command matches one of the
+        // given commands (e.g. "cbar" for EBU bars, "smtpe" for SMPTE bars).
+        for (String cmd : commands) {
+            for (int i = 0; i < cmbTest.getItemCount(); i++) {
+                var ts = (TestSignalOption) cmbTest.getItemAt(i);
+                if (ts.command().equals(cmd)) {
+                    cmbTest.setSelectedIndex(i);
+                    return;
+                }
+            }
+        }
+    }
+    
     private boolean isPhilipsTestSignal() {
         if (!supportsPhilipsTestSignal) return false;
         if (cmbTest.getSelectedIndex() == -1) return false;
         var ts = (TestSignalOption) cmbTest.getSelectedItem();
         if (ts.patternFilename().isEmpty()) return false;
-        String d = PREFS.get("testdir", hackTVDirectory);
+        String d = getTestSignalDir();
         if (!Files.exists(Paths.get(d, "pm8546g.bin"))) return false;
         return Files.exists(Paths.get(d, ts.patternFilename()));
     }
@@ -7596,20 +7664,52 @@ public class MainWindow extends javax.swing.JFrame {
                 pb.directory(new File(hackTVDirectory));
                 // Try to start the process
                 try {
-                    hacktvProcess = pb.start();
-                    // Capture the output of hacktv
-                    try (var br = new BufferedReader(new InputStreamReader(hacktvProcess.getInputStream(), StandardCharsets.UTF_8))) {
-                        // Create a 4096 byte buffer to improve performance.
-                        char[] buffer = new char[4096];
-                        int count;
-                        while ((count = br.read(buffer)) != -1) {
-                            // Publish the buffer
-                            publish(new String(buffer, 0, count));
+                    for (int attempt = 1; ; attempt++) {
+                        // Never start while a previous hacktv is still exiting
+                        waitForPreviousHackTV();
+                        long started = System.nanoTime();
+                        hacktvProcess = pb.start();
+                        // Keep the start of the output to detect a busy device
+                        var head = new StringBuilder();
+                        // Capture the output of hacktv
+                        try (var br = new BufferedReader(new InputStreamReader(hacktvProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                            // Create a 4096 byte buffer to improve performance.
+                            char[] buffer = new char[4096];
+                            int count;
+                            while ((count = br.read(buffer)) != -1) {
+                                // Publish the buffer
+                                publish(new String(buffer, 0, count));
+                                if (head.length() < 8192) head.append(buffer, 0, count);
+                            }
                         }
-                        publish("hacktv stopped");
+                        // End of output is not the end of the process: the OS
+                        // closes hacktv's output before it has finished
+                        // exiting and releasing the SDR. Wait for the real
+                        // exit, so the Run button only comes back afterwards.
+                        int exitCode = hacktvProcess.waitFor();
+                        long runMs = (System.nanoTime() - started) / 1_000_000;
+                        // If the previous run's device release is still in
+                        // progress, the new hacktv fails to open the HackRF
+                        // straight away. Retry instead of failing the run.
+                        if (exitCode != 0 && !stopRequested
+                                && runMs < DEVICE_BUSY_WINDOW_MS
+                                && attempt <= DEVICE_BUSY_RETRIES
+                                && isDeviceBusyMessage(head.toString())) {
+                            publish("\nSDR still in use by the previous run, retrying ("
+                                    + attempt + "/" + DEVICE_BUSY_RETRIES + ")...\n");
+                            Thread.sleep(DEVICE_BUSY_RETRY_DELAY_MS);
+                            if (stopRequested) break;
+                            continue;
+                        }
+                        break;
                     }
+                    publish("hacktv stopped");
                 }
                 catch (IOException ex) {
+                    return ex.getMessage();
+                }
+                catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
                     return ex.getMessage();
                 }
                 return null;
@@ -7714,15 +7814,18 @@ public class MainWindow extends javax.swing.JFrame {
             @Override
             protected String doInBackground() {
                 // Create two processes, one for yt-dlp and the other for hacktv
+                var pbHackTV = new ProcessBuilder(allArgs)
+                        .redirectOutput(ProcessBuilder.Redirect.PIPE)
+                        .redirectErrorStream(true);
                 List<ProcessBuilder> pb = Arrays.asList(
                     new ProcessBuilder(ytargs)
                         // Redirect yt-dlp status to the Java console
                         .redirectError(ProcessBuilder.Redirect.INHERIT),
-                    new ProcessBuilder(allArgs)
-                        .redirectOutput(ProcessBuilder.Redirect.PIPE)
-                        .redirectErrorStream(true)
+                    pbHackTV
                 );
                 try {
+                    // Never start while a previous hacktv is still exiting
+                    waitForPreviousHackTV();
                     // Start the processes using startPipeline, which will pipe
                     // stdOut of yt-dlp to stdIn of hacktv
                     List<Process> p = ProcessBuilder.startPipeline(pb);
@@ -7737,8 +7840,11 @@ public class MainWindow extends javax.swing.JFrame {
                         while ((count = br.read(buffer)) != -1) {
                             publish(new String(buffer, 0, count));
                         }
-                        publish("hacktv stopped");
                     }
+                    // Wait for hacktv to really exit (and release the SDR)
+                    // before the Run button is re-enabled
+                    hacktvProcess.waitFor();
+                    publish("hacktv stopped");
                     // End yt-dlp if it's still running
                     // yt-dlp can spawn a child process, we need to kill this
                     // process instead of the parent. So check for it.
@@ -7753,6 +7859,10 @@ public class MainWindow extends javax.swing.JFrame {
                     }
                 }
                 catch (IOException ex) {
+                    return ex.getMessage();
+                }
+                catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
                     return ex.getMessage();
                 }
                 return null;
@@ -7809,6 +7919,22 @@ public class MainWindow extends javax.swing.JFrame {
         runTV.execute();
     }
     
+    private void waitForPreviousHackTV() throws InterruptedException {
+        // Called from the run workers' background threads. Blocks until a
+        // previous hacktv process (if any) has fully exited.
+        Process p = hacktvProcess;
+        if (p != null && p.isAlive()) p.waitFor(15, TimeUnit.SECONDS);
+    }
+    
+    private static boolean isDeviceBusyMessage(String output) {
+        // libhackrf reports a device held by another process as
+        // "Access denied" (macOS/Windows) or "HackRF busy"/"Resource busy".
+        if (!output.contains("hackrf_open() failed")) return false;
+        return output.contains("Access denied")
+                || output.contains("HackRF busy")
+                || output.contains("Resource busy");
+    }
+    
     private void stopTV() {
         /** To stop hacktv gracefully, it needs to be sent one of the signals
          *  defined in hacktv.c: SIGINT, SIGILL, SIGFPE, SIGSEGV, SIGTERM, SIGABRT.
@@ -7820,6 +7946,7 @@ public class MainWindow extends javax.swing.JFrame {
          *  GenerateConsoleCtrlEvent API, so we have implemented this
          *  using a JNI module.
          */
+        stopRequested = true;
         if (hacktvProcess == null || !hacktvProcess.isAlive()) return;
         String err = "";
         if (hacktvProcess.supportsNormalTermination()) {
@@ -7862,6 +7989,7 @@ public class MainWindow extends javax.swing.JFrame {
         chkSyntaxOnly.setEnabled(false);
         btnHackTVPath.setEnabled(false);
         if (isWindows) btnDownloadHackTV.setEnabled(false);
+        stopRequested = false;
         running = true;
     }
     
@@ -7919,7 +8047,7 @@ public class MainWindow extends javax.swing.JFrame {
 
     private void btnTestSettingsActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_btnTestSettingsActionPerformed
         // Show the setting dialogue box
-        var td = new TestSettingsDialogue(this, true, hackTVDirectory);
+        var td = new TestSettingsDialogue(this, true, getTestSignalDir());
         td.setVisible(true);
         if (td.settingsChanged()) {
             addTestCardOptions();
