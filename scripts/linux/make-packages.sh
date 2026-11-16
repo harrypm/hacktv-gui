@@ -147,6 +147,8 @@ ln -s /opt/hacktv-gui/hacktv-gui "$R/usr/bin/hacktv-gui"
 desktop_file /usr/bin/hacktv-gui hacktv-gui > "$R/usr/share/applications/hacktv-gui.desktop"
 install -m 644 "$ICON" "$R/usr/share/icons/hicolor/256x256/apps/hacktv-gui.png"
 printf '%s\n' "$UDEV_RULES" > "$R/usr/lib/udev/rules.d/60-hacktv-gui.rules"
+# Also shipped on its own for AppImage users (an AppImage cannot install it)
+printf '%s\n' "$UDEV_RULES" > "$OUT/60-hacktv-gui.rules"
 # .htv settings files open in hacktv-gui (matches MimeType in the .desktop)
 mkdir -p "$R/usr/share/mime/packages"
 cat > "$R/usr/share/mime/packages/hacktv-gui.xml" <<'EOF'

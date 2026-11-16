@@ -8,17 +8,22 @@ on:
   push:
     branches:
       - macos-universal-app
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: "App version (blank = short commit hash)"
+        description: "Version (blank = short commit hash)"
+        required: false
+        type: string
+  # Called by release.yml, which builds every platform and publishes one release
+  workflow_call:
+    inputs:
+      version:
+        description: "Version (blank = short commit hash)"
         required: false
         type: string
 
 permissions:
-  contents: write   # only used by the tag-gated release step
+  contents: read
 
 jobs:
   hacktv:
@@ -69,7 +74,7 @@ jobs:
       - name: Upload hacktv (${{ matrix.arch }})
         uses: actions/upload-artifact@v7
         with:
-          name: hacktv-${{ matrix.arch }}
+          name: hacktv-macos-${{ matrix.arch }}
           path: hacktv-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
@@ -77,7 +82,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: build-logs-${{ matrix.arch }}
+          name: build-logs-macos-${{ matrix.arch }}
           path: ${{ runner.temp }}/build/*.log
 
   app:
@@ -102,14 +107,14 @@ jobs:
       - name: Download hacktv builds
         uses: actions/download-artifact@v8
         with:
-          pattern: hacktv-*
+          pattern: hacktv-macos-*
           path: dl
 
       - name: Create universal hacktv
         run: |
           for a in arm64 x86_64; do
             mkdir -p "hacktv-$a"
-            tar -xzf "dl/hacktv-$a/hacktv-$a.tar.gz" -C "hacktv-$a"
+            tar -xzf "dl/hacktv-macos-$a/hacktv-$a.tar.gz" -C "hacktv-$a"
           done
           lipo -create hacktv-arm64/hacktv-arm64 hacktv-x86_64/hacktv-x86_64 -output hacktv-universal
           lipo -info hacktv-universal
@@ -162,18 +167,3 @@ jobs:
             dist/*.dmg
             dist/*.sha256
           if-no-files-found: error
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/*.zip
-            dist/*.dmg
-            dist/*.sha256
-          body: |
-            hacktv-gui ${{ steps.version.outputs.version }} for macOS 11 or later, universal (Apple Silicon + Intel).
-            Bundles hacktv (inaxeon/hacktv, HackDAC support) and Java 21 runtimes; nothing else to install.
-
-            The app is ad-hoc signed, not notarized. After downloading, clear the quarantine flag once:
-            `xattr -dr com.apple.quarantine /Applications/hacktv-gui.app`

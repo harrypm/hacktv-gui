@@ -1,0 +1,142 @@
+name: Build and release
+
+# Builds every package and publishes them together as one GitHub release:
+#   macOS   universal .app (.zip, .dmg)
+#   Windows x64 installer (Standard/Portable) and portable .zip
+#   Linux   x86_64 + aarch64 .deb and .AppImage
+# All bundle hacktv built from inaxeon/hacktv (HackDAC support).
+#
+# Start a release either way:
+#   - push a tag:        git tag v1.2.3 && git push origin v1.2.3
+#   - Actions tab:       "Build and release" > Run workflow > tag v1.2.3
+#     (the tag is created on the selected branch's commit when the release
+#     is published)
+# Nothing is published unless every platform builds and passes its checks.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.2.3"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One release per tag at a time
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Check tag
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Validate tag
+        id: tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag (expected v1.2.3 or v1.2.3-beta1)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG"
+
+  macos:
+    needs: prepare
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  windows:
+    needs: prepare
+    uses: ./.github/workflows/windows-packages.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  linux:
+    needs: prepare
+    uses: ./.github/workflows/linux-packages.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+
+  release:
+    name: Publish release
+    needs: [prepare, macos, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: hacktv-gui-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check and checksum packages
+        working-directory: dist
+        env:
+          V: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Every expected package must be present before anything is published
+          for f in \
+            "hacktv-gui-$V-macos-universal.zip" \
+            "hacktv-gui-$V-macos-universal.dmg" \
+            "hacktv-gui-$V-windows-x64-setup.exe" \
+            "hacktv-gui-$V-windows-x64-portable.zip" \
+            "hacktv-gui-$V-x86_64.AppImage" \
+            "hacktv-gui-$V-aarch64.AppImage" \
+            "60-hacktv-gui.rules"; do
+            test -s "$f" || { echo "::error::missing package: $f"; ls -l; exit 1; }
+          done
+          ls *_amd64.deb *_arm64.deb
+          # Per-platform .sha256 files are replaced by one combined list
+          rm -f *.sha256
+          sha256sum -- * | tee SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: hacktv-gui ${{ needs.prepare.outputs.version }}
+          prerelease: ${{ inputs.prerelease || contains(needs.prepare.outputs.version, '-') }}
+          fail_on_unmatched_files: true
+          files: dist/*
+          body: |
+            hacktv-gui ${{ needs.prepare.outputs.version }}
+
+            Every package bundles hacktv built from [inaxeon/hacktv](https://github.com/inaxeon/hacktv) (HackDAC support), its test signals and a Java 21 runtime; nothing else needs installing.
+
+            | Platform | Files |
+            |---|---|
+            | macOS 11+ (Apple Silicon + Intel) | `.dmg` or `.zip` (universal app) |
+            | Windows 10/11 x64 | `-setup.exe` (Standard or Portable install), or `-portable.zip` |
+            | Linux x86_64 / arm64 | `.deb` (Debian/Ubuntu/Mint) or `.AppImage` |
+
+            **macOS:** the app is ad-hoc signed, not notarized. After copying it to Applications, clear the quarantine flag once:
+            `xattr -dr com.apple.quarantine /Applications/hacktv-gui.app`
+
+            **Windows:** the installer is unsigned, so SmartScreen will warn; choose "More info" > "Run anyway".
+
+            **Linux:** the `.deb` installs HackRF/FL2K USB access rules, so no sudo is needed to transmit (replug the device after installing). AppImage users install the rules once:
+            `sudo cp 60-hacktv-gui.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules`, then replug the device.
+
+            Checksums: `SHA256SUMS`.
