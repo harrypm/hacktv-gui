@@ -97,6 +97,8 @@ jobs:
             target/licenses/
 
       - name: Check out download repository
+        # Upstream's download site; needs its secret, so not on forks
+        if: github.repository == 'steeviebops/hacktv-gui'
         uses: actions/checkout@v5
         with:
           repository: steeviebops/download.bops.ie
@@ -104,6 +106,8 @@ jobs:
           path: download-repo
 
       - name: Update download files
+        # Upstream's download site; needs its secret, so not on forks
+        if: github.repository == 'steeviebops/hacktv-gui'
         shell: pwsh
         run: |
           $destination = "download-repo/hacktv-gui"
@@ -116,6 +120,8 @@ jobs:
               "$destination/bandplans.ini"
 
       - name: Commit updated download files
+        # Upstream's download site; needs its secret, so not on forks
+        if: github.repository == 'steeviebops/hacktv-gui'
         shell: pwsh
         working-directory: download-repo
         run: |
