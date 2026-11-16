@@ -269,15 +269,19 @@ fi
 [ "$(ls "$OUT/testsignals" | wc -l)" -ge 19 ] || fail "test signals missing"
 [ "$(fsize "$OUT/testsignals/pm8546g.bin")" = "32768" ] || fail "pm8546g.bin is not 32768 bytes"
 
-# Functional test: render PAL colour bars to a baseband file for ~2 seconds
-# (perl alarm = portable timeout; hacktv does not trap SIGALRM)
+# Functional test: render PAL colour bars as baseband to stdout and count
+# the first 4 MB. hacktv stops on SIGPIPE once head has enough, so the test
+# does not depend on runner speed (a fixed 2 s window produced 0 bytes on a
+# slow CI runner). perl alarm = portable 30 s safety timeout.
+SELFTEST_BYTES=4000000
 sz="skipped"
 if [ "$CROSS" = 0 ]; then
-	t="$WORK/selftest-$ARCH.bin"; rm -f "$t"
-	( perl -e 'alarm shift; exec @ARGV' 2 "$BIN" -m pal -s 13500000 -o "$t" test >/dev/null 2>&1 ) 2>/dev/null || true
-	sz="$( [ -f "$t" ] && fsize "$t" || echo 0)"
-	[ "$sz" -gt 1000000 ] || fail "baseband self-test produced $sz bytes"
-	rm -f "$t"
+	sz="$( ( perl -e 'alarm shift; exec @ARGV' 30 "$BIN" -m pal -s 13500000 -o - test \
+		2>"$WORK/selftest-$ARCH.log" | head -c "$SELFTEST_BYTES" | wc -c ) 2>/dev/null || true)"
+	sz="$(echo "$sz" | tr -d ' ')"
+	[ "${sz:-0}" -ge "$SELFTEST_BYTES" ] ||
+		{ cat "$WORK/selftest-$ARCH.log" >&2; fail "baseband self-test produced ${sz:-0} bytes"; }
+	sz="$sz bytes"
 fi
 
 [ "$OS" = Darwin ] && echo "minos: $(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"

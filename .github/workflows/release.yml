@@ -6,7 +6,7 @@ name: Build and release
 #   Linux   x86_64 + aarch64 .deb and .AppImage
 # All bundle hacktv built from inaxeon/hacktv (HackDAC support).
 #
-# Every push to the branch builds and tests all packages (downloadable as
+# Every push to main or the branch builds and tests all packages (downloadable as
 # run artifacts); nothing is published.
 #
 # Publish a release either way:
@@ -20,6 +20,7 @@ name: Build and release
 on:
   push:
     branches:
+      - main
       - macos-universal-app
     tags:
       - 'v*'
