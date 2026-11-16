@@ -228,6 +228,29 @@ Section "!Required files" MAIN
     ${EndIf}
 SectionEnd
 
+!ifdef BUNDLED_HACKTV
+# hacktv is bundled in the installer (CI builds of inaxeon/hacktv with
+# HackDAC support) instead of being downloaded at install time.
+# hacktv-gui finds hacktv.exe next to its jar, and the test signals at
+# <hacktv dir>\..\share\hacktv\testsignals.
+Section "hacktv (HackDAC support)" HACKTV
+    SetOutPath "$INSTDIR\bin"
+    File "hacktv.exe"
+    CreateDirectory "$INSTDIR\share\hacktv\testsignals"
+    SetOutPath "$INSTDIR\share\hacktv\testsignals"
+    File "testsignals\*.bin"
+SectionEnd
+
+Section ""
+    SetOutPath "$INSTDIR\bin"
+    DetailPrint "Installing native components..."
+    ExecWait '"$INSTDIR\hacktv-gui.exe" /copydll' $2
+    ${If} $2 != 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION \
+            "An error occurred while attempting to install native components."
+    ${EndIf}
+SectionEnd
+!else
 Section "hacktv" HACKTV
 SectionEnd
 
@@ -261,6 +284,7 @@ Section ""
         ${EndIf}
     ${EndIf}
 SectionEnd
+!endif
 
 Section ""
     # Calculate on-disk size, from https://nsis-dev.github.io/NSIS-Forums/html/t-267188.html
@@ -285,6 +309,10 @@ Section Uninstall
         # Remove JRE
         ${If} ${FileExists} `$INSTDIR\jre\*.*`
             RMDir /r $INSTDIR\jre
+        ${EndIf}
+        # Remove bundled test signals
+        ${If} ${FileExists} `$INSTDIR\share\*.*`
+            RMDir /r $INSTDIR\share
         ${EndIf}
         # Remove Start menu shortcuts
         var /global startDir
@@ -350,12 +378,18 @@ Function .onInit
 
     # Set estimated disk space requirements for each section
     SectionSetSize ${MAIN} 149500
-    SectionSetSize ${HACKTV} 24576
+    !ifndef BUNDLED_HACKTV
+        SectionSetSize ${HACKTV} 24576
+    !endif
 FunctionEnd
 
 # Set section descriptions
 LangString DESC_MAIN ${LANG_ENGLISH} "Installs hacktv-gui and supporting files."
+!ifdef BUNDLED_HACKTV
+LangString DESC_HACKTV ${LANG_ENGLISH} "Installs the bundled hacktv (inaxeon fork, HackDAC support) and its test signals."
+!else
 LangString DESC_HACKTV ${LANG_ENGLISH} "Installs the latest build of hacktv. The fork can be changed in hacktv-gui after installation is complete."
+!endif
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
     !insertmacro MUI_DESCRIPTION_TEXT ${MAIN} $(DESC_MAIN)
     !insertmacro MUI_DESCRIPTION_TEXT ${HACKTV} $(DESC_HACKTV)

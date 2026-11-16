@@ -1,0 +1,179 @@
+name: Build macOS universal app
+
+# hacktv-gui.app for Apple Silicon + Intel, with a bundled universal hacktv
+# (inaxeon/hacktv, HackDAC support) and bundled Java runtimes.
+# Build logic lives in scripts/macos/ so it can be run and tested locally.
+
+on:
+  push:
+    branches:
+      - macos-universal-app
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version (blank = short commit hash)"
+        required: false
+        type: string
+
+permissions:
+  contents: write   # only used by the tag-gated release step
+
+jobs:
+  hacktv:
+    name: hacktv (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Runner images are pinned: macos-latest can jump a macOS major
+          # and silently change the build output.
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: |
+          # Build tools only; no libraries come from Homebrew (the build
+          # isolates pkg-config to its own prefix).
+          brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            brew list nasm >/dev/null 2>&1 || brew install nasm
+          fi
+          cmake --version | head -1
+
+      - name: Build hacktv
+        run: scripts/build-hacktv.sh "$RUNNER_TEMP/build"
+
+      - name: Check architecture
+        run: |
+          a="$(lipo -archs "$RUNNER_TEMP/build/out/hacktv-${{ matrix.arch }}")"
+          echo "built: $a"
+          test "$a" = "${{ matrix.arch }}"
+
+      - name: Pack build output
+        # tar keeps the executable bit, which upload-artifact would drop
+        run: tar -C "$RUNNER_TEMP/build/out" -czf "hacktv-${{ matrix.arch }}.tar.gz" .
+
+      - name: Upload hacktv (${{ matrix.arch }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: hacktv-${{ matrix.arch }}
+          path: hacktv-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs-${{ matrix.arch }}
+          path: ${{ runner.temp }}/build/*.log
+
+  app:
+    name: Universal app
+    needs: hacktv
+    runs-on: macos-15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build hacktv-gui
+        run: mvn -B package
+
+      - name: Download hacktv builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: hacktv-*
+          path: dl
+
+      - name: Create universal hacktv
+        run: |
+          for a in arm64 x86_64; do
+            mkdir -p "hacktv-$a"
+            tar -xzf "dl/hacktv-$a/hacktv-$a.tar.gz" -C "hacktv-$a"
+          done
+          lipo -create hacktv-arm64/hacktv-arm64 hacktv-x86_64/hacktv-x86_64 -output hacktv-universal
+          lipo -info hacktv-universal
+          # Both slices must be the same hacktv build
+          for a in arm64 x86_64; do
+            strings -a "hacktv-$a/hacktv-$a" | grep -E '^[0-9]{8}-[0-9a-f]{7}' | head -1
+          done | sort -u | tee versions.txt
+          test "$(wc -l < versions.txt)" -eq 1
+          # Test signals from both builds must be identical
+          diff -r hacktv-arm64/testsignals hacktv-x86_64/testsignals
+
+      - name: Determine version
+        id: version
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          fi
+          [ -n "$v" ] || v="$(git rev-parse --short HEAD)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+      - name: Assemble and package app
+        run: |
+          scripts/macos/make-app.sh \
+            --hacktv hacktv-universal \
+            --testsignals hacktv-arm64/testsignals \
+            --gui-target target \
+            --version "${{ steps.version.outputs.version }}" \
+            --out dist
+
+      - name: Check bundled hacktv
+        run: |
+          lipo -archs dist/hacktv-gui.app/Contents/app/hacktv
+          dist/hacktv-gui.app/Contents/app/hacktv --help 2>&1 | head -2
+          # Rosetta (if present on the runner) lets the x86_64 slice be tested too
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 dist/hacktv-gui.app/Contents/app/hacktv --help 2>&1 | head -2
+            arch -x86_64 dist/hacktv-gui.app/Contents/runtime/x86_64/bin/java -version
+          else
+            echo "Rosetta not available; x86_64 slice was tested on the Intel runner"
+          fi
+
+      - name: Upload app
+        uses: actions/upload-artifact@v7
+        with:
+          name: hacktv-gui-${{ steps.version.outputs.version }}-macos-universal
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.sha256
+          body: |
+            hacktv-gui ${{ steps.version.outputs.version }} for macOS 11 or later, universal (Apple Silicon + Intel).
+            Bundles hacktv (inaxeon/hacktv, HackDAC support) and Java 21 runtimes; nothing else to install.
+
+            The app is ad-hoc signed, not notarized. After downloading, clear the quarantine flag once:
+            `xattr -dr com.apple.quarantine /Applications/hacktv-gui.app`

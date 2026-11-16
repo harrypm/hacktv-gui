@@ -1,0 +1,113 @@
+name: Build Linux packages
+
+# hacktv-gui for Linux (x86_64 + arm64): .deb and .AppImage.
+# Both bundle a self-contained hacktv (inaxeon/hacktv, HackDAC support;
+# static libusb 1.0.26 / libhackrf 2023.01.1 / osmo-fl2k / FFmpeg 6.1.1),
+# its test signals and a Temurin 21 JRE.
+# Build logic: scripts/build-hacktv.sh + scripts/linux/make-packages.sh.
+
+on:
+  push:
+    branches:
+      - macos-universal-app
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # only used by the tag-gated release step
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned images: the glibc they ship is the minimum the packages need
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config nasm zlib1g-dev \
+            git curl file binutils dpkg-dev
+
+      - name: Build hacktv
+        run: scripts/build-hacktv.sh "$RUNNER_TEMP/build"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build hacktv-gui
+        run: mvn -B package
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v="$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+      - name: Build .deb and .AppImage
+        run: |
+          scripts/linux/make-packages.sh \
+            --hacktv "$RUNNER_TEMP/build/out/hacktv-${{ matrix.arch }}" \
+            --testsignals "$RUNNER_TEMP/build/out/testsignals" \
+            --gui-target target \
+            --version "${{ steps.version.outputs.version }}" \
+            --out dist
+
+      - name: Test .deb install
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          test -x /opt/hacktv-gui/app/hacktv
+          /opt/hacktv-gui/app/hacktv --help 2>&1 | head -2
+          /opt/hacktv-gui/runtime/bin/java -version
+          test -f /usr/lib/udev/rules.d/60-hacktv-gui.rules
+          test -L /usr/bin/hacktv-gui
+          desktop-file-validate /usr/share/applications/hacktv-gui.desktop 2>/dev/null || true
+          sudo apt-get remove -y hacktv-gui
+          test ! -e /opt/hacktv-gui/app/hacktv
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: hacktv-gui-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/build/*.log
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.sha256
