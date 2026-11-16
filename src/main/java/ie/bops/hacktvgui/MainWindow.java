@@ -110,6 +110,7 @@ public class MainWindow extends javax.swing.JFrame {
     // Boolean used for Microsoft Windows detection and handling
     private final boolean isWindows = System.getProperty("os.name").contains("Windows");
     private final boolean isMacOS = System.getProperty("os.name").contains("Mac");
+    private final boolean isLinux = LinuxUsbAccess.isLinux();
     
     // Look and feel
     String defaultLaf;
@@ -2245,6 +2246,10 @@ public class MainWindow extends javax.swing.JFrame {
             chkUpdateCheck.setSelected(true);
             checkForUpdates(true);
         }
+        // Accept files and links dragged onto the window
+        installFileDrop();
+        // Linux: check USB access to the SDR (udev rules) once the window is up
+        if (isLinux) installLinuxUsbAccess();
         // If any command line parameters were specified, handle them
         if (args.length > 0) {
             // If the specified file has a .htv extension, open it
@@ -7688,6 +7693,18 @@ public class MainWindow extends javax.swing.JFrame {
                         // exit, so the Run button only comes back afterwards.
                         int exitCode = hacktvProcess.waitFor();
                         long runMs = (System.nanoTime() - started) / 1_000_000;
+                        // Linux: "Access denied" also means missing udev
+                        // rules. That is not a busy device, so don't retry;
+                        // explain how to fix it instead.
+                        if (exitCode != 0 && isLinux && !stopRequested
+                                && isUsbAccessMessage(head.toString())
+                                && LinuxUsbAccess.hasInaccessibleDevice()) {
+                            publish("\nThis user has no permission to use the SDR's USB device.\n"
+                                    + "Install the USB access rules from Help > USB device access, "
+                                    + "then unplug and replug the device.\n");
+                            SwingUtilities.invokeLater(() -> showUsbAccessDialog(false));
+                            break;
+                        }
                         // If the previous run's device release is still in
                         // progress, the new hacktv fails to open the HackRF
                         // straight away. Retry instead of failing the run.
@@ -7926,6 +7943,11 @@ public class MainWindow extends javax.swing.JFrame {
         if (p != null && p.isAlive()) p.waitFor(15, TimeUnit.SECONDS);
     }
     
+    private static boolean isUsbAccessMessage(String output) {
+        return output.contains("Access denied") || output.contains("insufficient permissions")
+                || output.contains("LIBUSB_ERROR_ACCESS") || output.contains("usb_open error -3");
+    }
+
     private static boolean isDeviceBusyMessage(String output) {
         // libhackrf reports a device held by another process as
         // "Access denied" (macOS/Windows) or "HackRF busy"/"Resource busy".
@@ -8095,6 +8117,323 @@ public class MainWindow extends javax.swing.JFrame {
             }
         }
     }//GEN-LAST:event_btnSourceBrowseActionPerformed
+
+    /**
+     * Linux only: the AppImage and a plain jar cannot install udev rules, so
+     * without them the SDR is root-only and hacktv fails with "Access
+     * denied". Detect that and offer to install the rules (Help menu entry,
+     * plus a prompt at startup until they are installed or the user opts out).
+     */
+    private void installLinuxUsbAccess() {
+        var item = new javax.swing.JMenuItem("USB device access...");
+        item.addActionListener(e -> showUsbAccessDialog(true));
+        int about = Arrays.asList(helpMenu.getMenuComponents()).indexOf(menuAbout);
+        helpMenu.insert(item, about >= 0 ? about : helpMenu.getItemCount());
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowOpened(java.awt.event.WindowEvent e) {
+                removeWindowListener(this);
+                if (!LinuxUsbAccess.udevAvailable()) return;
+                if (!LinuxUsbAccess.rulesState().complete()) {
+                    if (PREFS.getInt("usbrulesprompt", 1) == 1) showUsbAccessDialog(false);
+                } else if (LinuxUsbAccess.hasInaccessibleDevice()) {
+                    // Rules exist but the device predates them (or the user
+                    // is not on the local seat): a replug usually fixes it.
+                    txtConsoleOutput.append("USB: an SDR is connected but this user cannot open it. "
+                            + "Unplug and replug it (Help > USB device access for details).\n");
+                }
+            }
+        });
+    }
+
+    /**
+     * Shows what was detected and offers to install the rules.
+     * @param fromMenu true when opened from the Help menu (no "don't ask again")
+     */
+    private void showUsbAccessDialog(boolean fromMenu) {
+        var rules = LinuxUsbAccess.rulesState();
+        var devices = LinuxUsbAccess.connectedDevices();
+        var sb = new StringBuilder();
+        sb.append("USB access rules: ");
+        if (rules.ours()) sb.append("installed (" + LinuxUsbAccess.RULES_NAME + ")");
+        else if (rules.complete()) sb.append("provided by other packages");
+        else if (rules.hackrf()) sb.append("HackRF only (FL2000 missing)");
+        else if (rules.fl2k()) sb.append("FL2000 only (HackRF missing)");
+        else sb.append("not installed");
+        sb.append("\n\nConnected devices:\n");
+        if (devices.isEmpty()) sb.append("  none detected\n");
+        for (var d : devices) sb.append("  ").append(d).append('\n');
+        if (!LinuxUsbAccess.udevAvailable()) {
+            sb.append("\nudev is not running on this system, so rules cannot be applied.\n"
+                    + "Run hacktv-gui as a user with access to the USB device instead.");
+            messageBox(sb.toString(), JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (rules.complete()) {
+            if (devices.stream().anyMatch(d -> !d.accessible())) {
+                sb.append("\nThe rules are installed but a device is not accessible.\n"
+                        + "Unplug it and plug it back in. If that does not help");
+                sb.append(LinuxUsbAccess.inPlugdevGroup()
+                        ? ", log out and back in.\n"
+                        : ", add yourself to the plugdev group\n(sudo usermod -aG plugdev $USER) and log in again.\n");
+                messageBox(sb.toString(), JOptionPane.WARNING_MESSAGE);
+            } else if (fromMenu) {
+                messageBox(sb.toString(), JOptionPane.INFORMATION_MESSAGE);
+            }
+            return;
+        }
+        sb.append("\nWithout these rules only root can use HackRF and FL2000 devices,\n"
+                + "so transmitting fails with \"Access denied\".\n\n"
+                + "Install the rules now? You will be asked for your password.");
+        Object[] options = fromMenu
+                ? new Object[] { "Install rules", "Cancel" }
+                : new Object[] { "Install rules", "Not now", "Don't ask again" };
+        int choice = JOptionPane.showOptionDialog(this, sb.toString(), Shared.APP_NAME + " - USB device access",
+                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+        if (choice == 2) {
+            PREFS.putInt("usbrulesprompt", 0);
+            return;
+        }
+        if (choice != 0) return;
+        if (!LinuxUsbAccess.pkexecAvailable()) {
+            showManualUsbRules("pkexec (the desktop password prompt) is not available.");
+            return;
+        }
+        setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+        new SwingWorker<Object[], Void>() {
+            @Override
+            protected Object[] doInBackground() throws Exception {
+                var r = LinuxUsbAccess.install();
+                List<LinuxUsbAccess.Device> after = r.ok()
+                        ? LinuxUsbAccess.waitForAccess(3000)
+                        : LinuxUsbAccess.connectedDevices();
+                return new Object[] { r, after };
+            }
+
+            @Override
+            protected void done() {
+                setCursor(Cursor.getDefaultCursor());
+                LinuxUsbAccess.InstallResult r;
+                List<?> after;
+                try {
+                    Object[] res = get();
+                    r = (LinuxUsbAccess.InstallResult) res[0];
+                    after = (List<?>) res[1];
+                } catch (InterruptedException | ExecutionException ex) {
+                    showManualUsbRules("Installing failed: " + ex.getMessage());
+                    return;
+                }
+                if (r.cancelled()) {
+                    messageBox("Not installed (authentication was cancelled).\n"
+                            + "You can install the rules later from Help > USB device access.",
+                            JOptionPane.INFORMATION_MESSAGE);
+                    return;
+                }
+                if (!r.ok()) {
+                    showManualUsbRules("Installing failed:\n" + r.output());
+                    return;
+                }
+                PREFS.putInt("usbrulesprompt", 1);
+                var msg = new StringBuilder("USB access rules installed to " + LinuxUsbAccess.RULES_TARGET + ".\n");
+                if (after.isEmpty()) {
+                    msg.append("Plug in your HackRF or FL2000 and it will be usable straight away.");
+                } else {
+                    msg.append("\nConnected devices:\n");
+                    for (Object d : after) msg.append("  ").append(d).append('\n');
+                    if (after.stream().anyMatch(d -> !((LinuxUsbAccess.Device) d).accessible())) {
+                        msg.append("\nUnplug the device and plug it back in to finish.");
+                    }
+                }
+                messageBox(msg.toString(), JOptionPane.INFORMATION_MESSAGE);
+            }
+        }.execute();
+    }
+
+    /** Fallback: save the rules and show the commands to install them by hand. */
+    private void showManualUsbRules(String reason) {
+        String text;
+        try {
+            var copy = LinuxUsbAccess.saveUserCopy();
+            text = reason + "\n\nThe rules were saved to " + copy + ".\n"
+                    + "Install them from a terminal with:\n\n" + LinuxUsbAccess.manualCommands(copy)
+                    + "\nthen unplug and replug the device.";
+        } catch (IOException ex) {
+            text = reason + "\n\nThe rules could not be saved either: " + ex.getMessage();
+        }
+        var area = new javax.swing.JTextArea(text);
+        area.setEditable(false);
+        area.setLineWrap(false);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, area.getFont().getSize()));
+        JOptionPane.showMessageDialog(this, new javax.swing.JScrollPane(area),
+                Shared.APP_NAME + " - USB device access", JOptionPane.WARNING_MESSAGE);
+    }
+
+    /**
+     * Drag and drop: files or links dropped anywhere on the window.
+     * <ul>
+     * <li>one .htv file: opened as a configuration (same as File &gt; Open)</li>
+     * <li>one .m3u/.m3u8 playlist: loaded as the source (same as Browse)</li>
+     * <li>one media file or http(s) link: becomes the source</li>
+     * <li>several files: added to the playlist</li>
+     * </ul>
+     * Dropped text that is not a link still goes into the source text box.
+     */
+    private void installFileDrop() {
+        var listener = new java.awt.dnd.DropTargetAdapter() {
+            @Override
+            public void dragEnter(java.awt.dnd.DropTargetDragEvent e) {
+                if (running || !canAcceptDrop(e.getCurrentDataFlavorsAsList())) {
+                    e.rejectDrag();
+                } else {
+                    e.acceptDrag(java.awt.dnd.DnDConstants.ACTION_COPY);
+                }
+            }
+
+            @Override
+            public void dragOver(java.awt.dnd.DropTargetDragEvent e) {
+                dragEnter(e);
+            }
+
+            @Override
+            public void drop(java.awt.dnd.DropTargetDropEvent e) {
+                if (running) {
+                    e.rejectDrop();
+                    messageBox("Stop the transmission before changing the source.", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                e.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY);
+                List<String> items;
+                try {
+                    items = droppedItems(e.getTransferable());
+                } catch (java.awt.datatransfer.UnsupportedFlavorException | IOException ex) {
+                    e.dropComplete(false);
+                    return;
+                }
+                e.dropComplete(!items.isEmpty());
+                // Let the drag source finish before any dialogue opens
+                if (!items.isEmpty()) SwingUtilities.invokeLater(() -> handleDroppedItems(items));
+            }
+        };
+        // The root pane catches drops on most of the window; the source box
+        // and playlist have their own drop targets (text and list
+        // transfer handlers), so they get the same listener.
+        for (Component c : new Component[] { getRootPane(), txtSource, lstPlaylist, playlistScrollPane }) {
+            new java.awt.dnd.DropTarget(c, java.awt.dnd.DnDConstants.ACTION_COPY, listener, true);
+        }
+    }
+
+    private static final java.awt.datatransfer.DataFlavor URI_LIST_FLAVOR = createUriListFlavor();
+
+    private static java.awt.datatransfer.DataFlavor createUriListFlavor() {
+        try {
+            return new java.awt.datatransfer.DataFlavor("text/uri-list;class=java.lang.String");
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
+    }
+
+    private static boolean canAcceptDrop(List<java.awt.datatransfer.DataFlavor> flavors) {
+        return flavors.contains(java.awt.datatransfer.DataFlavor.javaFileListFlavor)
+                || (URI_LIST_FLAVOR != null && flavors.contains(URI_LIST_FLAVOR))
+                || flavors.contains(java.awt.datatransfer.DataFlavor.stringFlavor);
+    }
+
+    /** Dropped data as a list of local paths and/or URLs (or one plain text item). */
+    private static List<String> droppedItems(java.awt.datatransfer.Transferable t)
+            throws java.awt.datatransfer.UnsupportedFlavorException, IOException {
+        var out = new ArrayList<String>();
+        if (t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.javaFileListFlavor)) {
+            for (Object o : (List<?>) t.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor)) {
+                out.add(((File) o).getAbsolutePath());
+            }
+            if (!out.isEmpty()) return out;
+        }
+        // Linux file managers and browsers often offer only text/uri-list
+        String text = null;
+        if (URI_LIST_FLAVOR != null && t.isDataFlavorSupported(URI_LIST_FLAVOR)) {
+            text = (String) t.getTransferData(URI_LIST_FLAVOR);
+        } else if (t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor)) {
+            text = (String) t.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor);
+        }
+        if (text == null) return out;
+        for (String line : text.split("\\r?\\n")) {
+            line = line.strip();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            if (line.startsWith("file:")) {
+                try {
+                    out.add(Paths.get(new URI(line)).toString());
+                    continue;
+                } catch (URISyntaxException | IllegalArgumentException | FileSystemNotFoundException ex) {
+                    // fall through and use the text as-is
+                }
+            }
+            out.add(line);
+        }
+        // Plain (non-path, non-link) text is kept as one item
+        if (out.size() > 1 && out.stream().noneMatch(MainWindow::isPathOrUrl)) {
+            return new ArrayList<>(List.of(text.strip()));
+        }
+        return out;
+    }
+
+    private static boolean isPathOrUrl(String s) {
+        String l = s.toLowerCase(Locale.ENGLISH);
+        return l.startsWith("http://") || l.startsWith("https://") || new File(s).isAbsolute();
+    }
+
+    private void handleDroppedItems(List<String> items) {
+        if (items.size() > 1) {
+            int added = 0, skipped = 0;
+            for (String item : items) {
+                String l = item.toLowerCase(Locale.ENGLISH);
+                var f = new File(item);
+                boolean isUrl = l.startsWith("http://") || l.startsWith("https://");
+                if (!isUrl && (!f.isFile() || l.endsWith(".htv") || l.endsWith(".m3u") || l.endsWith(".m3u8"))) {
+                    skipped++;
+                    continue;
+                }
+                playlistModel.addElement(item);
+                added++;
+            }
+            if (added > 0) lstPlaylist.setSelectedIndex(playlistModel.size() - 1);
+            if (skipped > 0) {
+                messageBox(added + " item(s) added to the playlist. " + skipped + " skipped "
+                        + "(folders, playlists and configuration files cannot be added to a playlist).",
+                        JOptionPane.INFORMATION_MESSAGE);
+            }
+            return;
+        }
+        String item = items.get(0);
+        String l = item.toLowerCase(Locale.ENGLISH);
+        var f = new File(item);
+        if (l.endsWith(".htv") && f.isFile()) {
+            // Same as File > Open
+            selectedFile = f;
+            checkSelectedFile(selectedFile);
+            return;
+        }
+        if (f.isDirectory()) {
+            messageBox("Folders cannot be used as a source. Drop one or more files instead.", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (!radLocalSource.isEnabled()) {
+            messageBox("The current mode does not take a file or internet source.", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (!radLocalSource.isSelected()) radLocalSource.doClick();
+        if (f.isFile() && (l.endsWith(".m3u") || l.endsWith(".m3u8"))) {
+            // Same as choosing a playlist with Browse
+            txtSource.setText(f.getAbsolutePath());
+            m3uHandler(f.getAbsolutePath());
+            return;
+        }
+        txtSource.setVisible(true);
+        cmbM3USource.setVisible(false);
+        cmbM3USource.setEnabled(false);
+        var card = (CardLayout) sourceCardPanel.getLayout();
+        card.show(sourceCardPanel, "textbox");
+        txtSource.setText(item);
+    }
 
     private void menuNewActionPerformed(java.awt.event.ActionEvent evt) {//GEN-FIRST:event_menuNewActionPerformed
         resetAllControls();

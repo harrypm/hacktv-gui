@@ -1,0 +1,8 @@
+# hacktv-gui: USB access for HackRF and FL2000 (osmo-fl2k) devices
+# HackRF One / Jawbreaker / rad1o, and the NXP DFU loader used for recovery
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="6089", MODE="660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="604b", MODE="660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="cc15", MODE="660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1fc9", ATTR{idProduct}=="000c", MODE="660", GROUP="plugdev", TAG+="uaccess"
+# FL2000 USB VGA adapters (as in osmo-fl2k.rules)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d5c", ATTR{idProduct}=="2000", MODE="660", GROUP="plugdev", TAG+="uaccess"

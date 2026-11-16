@@ -136,7 +136,6 @@ jobs:
 
             **Windows:** the installer is unsigned, so SmartScreen will warn; choose "More info" > "Run anyway".
 
-            **Linux:** the `.deb` installs HackRF/FL2K USB access rules, so no sudo is needed to transmit (replug the device after installing). AppImage users install the rules once:
-            `sudo cp 60-hacktv-gui.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules`, then replug the device.
+            **Linux:** the `.deb` installs HackRF/FL2K USB access rules, so no sudo is needed to transmit. The AppImage detects missing rules on first run and offers to install them (asks for your password); it can be redone from Help > USB device access. `60-hacktv-gui.rules` is also attached for manual installs. Replug the device after installing the rules.
 
             Checksums: `SHA256SUMS`.

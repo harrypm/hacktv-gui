@@ -86,7 +86,11 @@ jobs:
 
       - name: Test .deb install
         run: |
+          # USB access detection (used by the AppImage first-run prompt):
+          # no rules before the .deb is installed, ours found afterwards
+          java -cp target/hacktv-gui.jar scripts/linux/UsbAccessCheck.java false
           sudo apt-get install -y ./dist/*.deb
+          java -cp target/hacktv-gui.jar scripts/linux/UsbAccessCheck.java true
           test -x /opt/hacktv-gui/app/hacktv
           /opt/hacktv-gui/app/hacktv --help 2>&1 | head -2
           /opt/hacktv-gui/runtime/bin/java -version

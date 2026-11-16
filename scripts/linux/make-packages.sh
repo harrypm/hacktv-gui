@@ -127,14 +127,9 @@ EOF
 # HackRF (incl. HackDAC firmware) and FL2K access for the desktop user:
 # uaccess grants the logged-in seat user access, plugdev keeps the
 # traditional group working. Must sort before 73-seat-late.rules.
-UDEV_RULES='# hacktv-gui: USB access for HackRF and FL2000 (osmo-fl2k) devices
-# HackRF One / Jawbreaker / rad1o, and the NXP DFU loader used for recovery
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="6089", MODE="660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="604b", MODE="660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="cc15", MODE="660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTR{idVendor}=="1fc9", ATTR{idProduct}=="000c", MODE="660", GROUP="plugdev", TAG+="uaccess"
-# FL2000 USB VGA adapters (as in osmo-fl2k.rules)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d5c", ATTR{idProduct}=="2000", MODE="660", GROUP="plugdev", TAG+="uaccess"'
+# Single source, also used by the GUI's own installer (AppImage, plain jar)
+UDEV_RULES_FILE="$REPO/src/main/resources/ie/bops/resources/linux/60-hacktv-gui.rules"
+[ -f "$UDEV_RULES_FILE" ] || fail "missing $UDEV_RULES_FILE"
 
 # ---- .deb ---------------------------------------------------------------------
 DEB="$OUT/hacktv-gui_${DEBVER}_${DEBARCH}.deb"
@@ -146,9 +141,9 @@ cp -a "$TREE" "$R/opt/hacktv-gui"
 ln -s /opt/hacktv-gui/hacktv-gui "$R/usr/bin/hacktv-gui"
 desktop_file /usr/bin/hacktv-gui hacktv-gui > "$R/usr/share/applications/hacktv-gui.desktop"
 install -m 644 "$ICON" "$R/usr/share/icons/hicolor/256x256/apps/hacktv-gui.png"
-printf '%s\n' "$UDEV_RULES" > "$R/usr/lib/udev/rules.d/60-hacktv-gui.rules"
+install -m 644 "$UDEV_RULES_FILE" "$R/usr/lib/udev/rules.d/60-hacktv-gui.rules"
 # Also shipped on its own for AppImage users (an AppImage cannot install it)
-printf '%s\n' "$UDEV_RULES" > "$OUT/60-hacktv-gui.rules"
+install -m 644 "$UDEV_RULES_FILE" "$OUT/60-hacktv-gui.rules"
 # .htv settings files open in hacktv-gui (matches MimeType in the .desktop)
 mkdir -p "$R/usr/share/mime/packages"
 cat > "$R/usr/share/mime/packages/hacktv-gui.xml" <<'EOF'
