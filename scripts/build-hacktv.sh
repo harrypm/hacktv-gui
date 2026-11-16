@@ -241,7 +241,7 @@ grep -q "HAVE_FL2K" "$WORK/hacktv-make-$ARCH.log" || fail "built without FL2K su
 v="$(strings -a "$BIN" | grep -E '^[0-9]{8}-[0-9a-f]{7}' | head -1)"
 [ "$v" = "$HACKTV_VERSION_EXPECT" ] || fail "version string '$v', expected $HACKTV_VERSION_EXPECT"
 
-"$BIN" --help 2>&1 | grep -q "Usage: hacktv" || fail "--help did not run"
+grep -q "Usage: hacktv" <<< "$("$BIN" --help 2>&1)" || fail "--help did not run"
 [ "$(ls "$OUT/testsignals" | wc -l)" -ge 19 ] || fail "test signals missing"
 [ "$(fsize "$OUT/testsignals/pm8546g.bin")" = "32768" ] || fail "pm8546g.bin is not 32768 bytes"
 

@@ -69,7 +69,8 @@ jobs:
           # Static build: no MinGW runtime or library DLLs may be imported
           # (Windows system DLLs are fine)
           x86_64-w64-mingw32-objdump -p src/hacktv.exe | awk '/DLL Name/{print $3}' | sort -u | tee dlls.txt
-          if grep -i -E '^(lib|av|sw|postproc|hackrf|usb|osmo)|pthread|gcc_s|stdc\+\+' dlls.txt; then
+          # (names listed explicitly: a bare "av" prefix also hits AVICAP32.dll)
+          if grep -i -E '^(lib|avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample|postproc|hackrf|usb|osmo)|pthread|gcc_s|stdc\+\+' dlls.txt; then
             echo "hacktv.exe imports non-system DLLs (not a static build)"; exit 1
           fi
           ls testsignals/*.bin | wc -l

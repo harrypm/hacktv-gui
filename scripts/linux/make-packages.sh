@@ -79,7 +79,7 @@ fetch() { # <url> <sha256> <file>
 [ -f "$TESTSIGNALS/pm8546g.bin" ] || fail "test signals not found in $TESTSIGNALS"
 
 # Debian versions must start with a digit (CI builds of a commit use 0~git<hash>)
-DEBVER="$VERSION"; [[ "$DEBVER" =~ ^[0-9] ]] || DEBVER="0~git$VERSION"
+DEBVER="$VERSION"; [[ "$DEBVER" =~ ^[0-9]+\. ]] || DEBVER="0~git$VERSION"
 
 # ---- Stage the application tree ----------------------------------------------
 log "Staging hacktv-gui $VERSION ($ARCH)"
@@ -237,14 +237,17 @@ chmod 755 "$APPIMAGE"
 
 # ---- Verification ----------------------------------------------------------
 log "Verifying"
-"$TREE/runtime/bin/java" -version 2>&1 | grep -q '"21\.' || fail "bundled Java does not run"
-"$TREE/app/hacktv" --help 2>&1 | grep -q "Usage: hacktv" || fail "bundled hacktv does not run"
-dpkg-deb --contents "$DEB" | grep -q './opt/hacktv-gui/app/hacktv$' || fail ".deb is missing hacktv"
-dpkg-deb --contents "$DEB" | grep -q 'share/hacktv/testsignals/pm8546g.bin' || fail ".deb is missing test signals"
+grep -q '"21\.' <<< "$("$TREE/runtime/bin/java" -version 2>&1)" || fail "bundled Java does not run"
+grep -q "Usage: hacktv" <<< "$("$TREE/app/hacktv" --help 2>&1)" || fail "bundled hacktv does not run"
+# Capture output first: grep -q exits early and, under pipefail, the
+# writer's SIGPIPE would fail the check even when the match is found.
+DEBLIST="$(dpkg-deb --contents "$DEB")"
+grep -q './opt/hacktv-gui/app/hacktv$' <<< "$DEBLIST" || fail ".deb is missing hacktv"
+grep -q 'share/hacktv/testsignals/pm8546g.bin' <<< "$DEBLIST" || fail ".deb is missing test signals"
 # The AppImage must contain the same tree
 ( cd "$CACHE" && rm -rf squashfs-root && APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --appimage-extract >/dev/null 2>&1 )
 [ -x "$CACHE/squashfs-root/opt-hacktv-gui/app/hacktv" ] || fail "AppImage is missing hacktv"
-"$CACHE/squashfs-root/opt-hacktv-gui/app/hacktv" --help 2>&1 | grep -q "Usage: hacktv" || fail "AppImage hacktv does not run"
+grep -q "Usage: hacktv" <<< "$("$CACHE/squashfs-root/opt-hacktv-gui/app/hacktv" --help 2>&1)" || fail "AppImage hacktv does not run"
 rm -rf "$CACHE/squashfs-root"
 
 ( cd "$OUT" && sha256sum "$(basename "$DEB")" "$(basename "$APPIMAGE")" > "hacktv-gui-${VERSION}-linux-${ARCH}.sha256" )

@@ -170,9 +170,9 @@ codesign --verify "$C/app/hacktv" || fail "hacktv signature does not verify"
 # ---- Verification ----------------------------------------------------------
 log "Verifying bundle"
 HOST="$(uname -m)"
-"$C/runtime/$HOST/bin/java" -version 2>&1 | grep -q '"21\.' || fail "bundled $HOST Java does not run"
-"$C/app/hacktv" --help 2>&1 | grep -q "Usage: hacktv" || fail "bundled hacktv does not run on $HOST"
-unzip -p "$C/app/hacktv-gui.jar" META-INF/MANIFEST.MF | grep -q "Main-Class: ie.bops.hacktvgui.Main" ||
+grep -q '"21\.' <<< "$("$C/runtime/$HOST/bin/java" -version 2>&1)" || fail "bundled $HOST Java does not run"
+grep -q "Usage: hacktv" <<< "$("$C/app/hacktv" --help 2>&1)" || fail "bundled hacktv does not run on $HOST"
+grep -q "Main-Class: ie.bops.hacktvgui.Main" <<< "$(unzip -p "$C/app/hacktv-gui.jar" META-INF/MANIFEST.MF)" ||
 	fail "jar has no Main-Class"
 [ "$(ls "$C/share/hacktv/testsignals" | wc -l)" -ge 19 ] || fail "test signals missing from bundle"
 
