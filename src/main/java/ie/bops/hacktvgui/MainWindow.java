@@ -169,6 +169,8 @@ public class MainWindow extends javax.swing.JFrame {
     // runHackTV) is never attempted after a deliberate stop.
     private volatile boolean stopRequested;
     // Automatic restart when the SDR is still held by the previous run
+    // How long Stop waits for hacktv to exit before ending it
+    private static final long STOP_GRACE_MS = 3000;
     private static final int DEVICE_BUSY_RETRIES = 5;
     private static final long DEVICE_BUSY_RETRY_DELAY_MS = 500;
     private static final long DEVICE_BUSY_WINDOW_MS = 3000;
@@ -7686,6 +7688,10 @@ public class MainWindow extends javax.swing.JFrame {
                                 publish(new String(buffer, 0, count));
                                 if (head.length() < 8192) head.append(buffer, 0, count);
                             }
+                        } catch (IOException readEx) {
+                            // After Stop, a closed stream is just the end of
+                            // the output, not an error worth a dialogue
+                            if (!stopRequested) throw readEx;
                         }
                         // End of output is not the end of the process: the OS
                         // closes hacktv's output before it has finished
@@ -7857,6 +7863,10 @@ public class MainWindow extends javax.swing.JFrame {
                         while ((count = br.read(buffer)) != -1) {
                             publish(new String(buffer, 0, count));
                         }
+                    } catch (IOException readEx) {
+                        // After Stop, a closed stream is just the end of the
+                        // output; carry on so yt-dlp is still cleaned up
+                        if (!stopRequested) throw readEx;
                     }
                     // Wait for hacktv to really exit (and release the SDR)
                     // before the Run button is re-enabled
@@ -7969,36 +7979,37 @@ public class MainWindow extends javax.swing.JFrame {
          *  using a JNI module.
          */
         stopRequested = true;
-        if (hacktvProcess == null || !hacktvProcess.isAlive()) return;
+        // Work on this exact process: the field is replaced by the next run
+        final Process p = hacktvProcess;
+        if (p == null || !p.isAlive()) return;
         String err = "";
-        if (hacktvProcess.supportsNormalTermination()) {
-            hacktvProcess.toHandle().destroy(); // Process.destory() also closes the I/O streams
+        if (p.supportsNormalTermination()) {
+            p.toHandle().destroy(); // Process.destory() also closes the I/O streams
         } else if (isWindows && ConsoleCtrlJNI.isInitialised()) {
             try {
-                ConsoleCtrlJNI.sendCtrlC(hacktvProcess.pid());
+                ConsoleCtrlJNI.sendCtrlC(p.pid());
             } catch (UnsatisfiedLinkError e) {
                 System.err.println(e);
-                err = "An error occurred when attempting to stop hacktv:\n" + e.getMessage() + "\n";
+                err = "Could not send Ctrl+C to hacktv (" + e.getMessage() + "). ";
             }
         }
-        // Start a watchdog timer in a new thread to ensure that hacktv has stopped
-        // If not, then use destroyForcibly()
+        // Watchdog: hacktv normally exits at once, but its HackRF shutdown
+        // can wait indefinitely for the device to report that streaming
+        // has stopped. After a short grace period, end it so Stop -> Run
+        // cycles quickly; the next run re-initialises the SDR, and retries
+        // while the OS is still releasing it. No dialogue: a console note
+        // is enough.
         final String stopErr = err;
         Thread.ofVirtual().start(() -> {
             try {
-                if (!hacktvProcess.waitFor(10, TimeUnit.SECONDS)) {
-                    hacktvProcess.destroyForcibly();
-                    SwingUtilities.invokeLater(() -> {
-                        String message = stopErr;
-                        if (message.isEmpty()) {
-                            message = "Unable to stop hacktv gracefully.\n";
-                        }
-                        messageBox(message +
-                                """
-                                The process has been forcibly terminated.
-                                This may require a reset of your SDR device.""",
-                                JOptionPane.ERROR_MESSAGE);
-                    });
+                if (!p.waitFor(STOP_GRACE_MS, TimeUnit.MILLISECONDS)) {
+                    // Via the handle: Process.destroyForcibly() would also
+                    // close the output stream under the reader thread
+                    p.toHandle().destroyForcibly();
+                    p.waitFor(5, TimeUnit.SECONDS);
+                    SwingUtilities.invokeLater(() -> txtConsoleOutput.append(
+                            "\n" + stopErr + "hacktv did not exit within "
+                            + (STOP_GRACE_MS / 1000) + " s of Stop, so it was ended.\n"));
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
